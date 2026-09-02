@@ -7,7 +7,7 @@ locals {
   # grant both my user and the CI role admin access, doesn't matter who ran apply
   admin_principal_arns = distinct([
     data.aws_caller_identity.current.arn,
-    "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/sentinel-github-actions-${var.suffix}",
+    "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/sentinel-github-actions-${var.suffix}-v2",
   ])
 }
 

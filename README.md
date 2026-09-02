@@ -60,7 +60,7 @@ Terraform backends and CI roles):
    ```
    This creates:
    - An S3 bucket for Terraform remote state (`sentinel-tfstate-juani-721500739616`).
-   - An IAM role (`sentinel-github-actions-juani`) that GitHub Actions assumes via OIDC, so no
+   - An IAM role (`sentinel-github-actions-juani-v2`) that GitHub Actions assumes via OIDC, so no
      long-lived AWS credentials ever sit in GitHub. Its permission policy mirrors the account's own
      `Candidates_Policy` - CI can't do anything a candidate couldn't already do by hand.
 
@@ -86,7 +86,9 @@ its restrictions ended up driving real architecture decisions:
 
 | Constraint (from the policy) | Effect on the design |
 |---|---|
-| `iam:CreateRole` / `AttachRolePolicy` / `PassRole` etc. restricted to `role/eks-*` and `role/sentinel-*` | Every IAM role this repo creates uses one of those two prefixes (`modules/iam-eks`, and the bootstrap CI role `sentinel-github-actions-juani`). |
+| `iam:CreateRole` / `AttachRolePolicy` / `PassRole` etc. restricted to `role/eks-*` and `role/sentinel-*` | Every IAM role this repo creates uses one of those two prefixes (`modules/iam-eks`, and the bootstrap CI role `sentinel-github-actions-juani-v2`). |
+| No `iam:UpdateAssumeRolePolicy` or `iam:DeleteRolePolicy` granted | A role's trust policy can never be edited after creation, and a role with an inline policy can never be deleted either (both blocked). The first CI role (`sentinel-github-actions-juani`, no `-v2`) got its trust policy condition wrong and is now permanently stuck that way - it's abandoned in place rather than fixed, and a new role (`-v2`) was created correctly instead. Same pattern visible on several other candidates' leftover roles in this account (`-v2`, `-v3` suffixes). |
+| AWS rejects a GitHub OIDC trust policy that conditions only on the `repository` claim | Must also include a `sub` (or `job_workflow_ref`) condition, even though `repository` alone is arguably the cleaner scoping given GitHub now embeds immutable ids into `sub` (`repo:owner@id/repo@id:...`). The trust policy keeps both: `repository` for the real scoping, `sub` wildcarded to satisfy AWS's validator. |
 | `kms:*` explicitly denied | No EKS secrets envelope encryption, no customer-managed keys anywhere. The state bucket uses SSE-S3 (`AES256`), not SSE-KMS. |
 | No `dynamodb:*` in the allow-list | State locking uses Terraform's native S3 lockfile (`use_lockfile = true`, Terraform >= 1.10) instead of a DynamoDB lock table. |
 | `iam:CreateOpenIDConnectProvider` not granted (only `Get*/List*/Simulate*` + `CreateServiceLinkedRole`) | Can't register a new OIDC provider. The GitHub Actions one already existed in the account, so the CI role's trust policy just references it - but IRSA for the EKS clusters themselves isn't possible, since each cluster's own OIDC issuer would need to be registered as a new IAM OIDC provider. That's why there's no AWS Load Balancer Controller or IRSA-based cluster-autoscaler in this PoC, both normally rely on it. Instead, the public and internal LoadBalancer Services go through EKS's built-in (in-tree) AWS cloud provider, which needs no IRSA, and cross-VPC access is enforced directly on the EKS-managed cluster security groups. With that constraint lifted, I'd install the AWS Load Balancer Controller via IRSA and switch to `Ingress` with `ip` targets instead of NodePort pass-through. |
