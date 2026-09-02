@@ -1,3 +1,8 @@
+# 169.254.169.253 is the AWS-provided VPC DNS resolver, reachable from any pod in any VPC.
+# Resolving per-request (via resolver + a variable in proxy_pass) instead of once at startup means
+# nginx doesn't crash-loop if the backend NLB's DNS name isn't resolvable yet at container start.
+resolver 169.254.169.253 valid=10s;
+
 server {
     listen 80;
     server_name _;
@@ -8,7 +13,8 @@ server {
     }
 
     location / {
-        proxy_pass http://${BACKEND_HOST}:${BACKEND_PORT}/;
+        set $upstream "http://${BACKEND_HOST}:${BACKEND_PORT}";
+        proxy_pass $upstream;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
