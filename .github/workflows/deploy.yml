@@ -117,7 +117,10 @@ jobs:
           sed -e "s|REPLACE_BACKEND_IMAGE|${{ needs.build-and-push-images.outputs.backend_image }}|" \
               -e "s#REPLACE_BACKEND_VPC_CIDR#${{ needs.terraform-apply.outputs.backend_vpc_cidr }}#" \
               -i k8s/backend/deployment.yaml k8s/backend/networkpolicy.yaml
-          kubectl apply --dry-run=server -f k8s/backend/
+          # namespace applied for real first (idempotent, harmless) - a dry run of it wouldn't
+          # actually exist yet for the namespaced resources dry-run right after to validate against
+          kubectl apply -f k8s/backend/namespace.yaml
+          kubectl apply --dry-run=server -f k8s/backend/deployment.yaml -f k8s/backend/networkpolicy.yaml -f k8s/backend/service.yaml
 
       - name: Deploy
         run: kubectl apply -f k8s/backend/
@@ -167,7 +170,8 @@ jobs:
           sed -e "s|REPLACE_GATEWAY_IMAGE|${{ needs.build-and-push-images.outputs.gateway_image }}|" \
               -e "s|REPLACE_BACKEND_HOST|${{ needs.deploy-backend.outputs.backend_lb_hostname }}|" \
               -i k8s/gateway/deployment.yaml
-          kubectl apply --dry-run=server -f k8s/gateway/
+          kubectl apply -f k8s/gateway/namespace.yaml
+          kubectl apply --dry-run=server -f k8s/gateway/deployment.yaml -f k8s/gateway/service.yaml
 
       - name: Deploy
         run: kubectl apply -f k8s/gateway/
