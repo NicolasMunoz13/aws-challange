@@ -4,6 +4,11 @@ A proof-of-concept for Rapyd Sentinel's split architecture: two isolated VPCs, o
 peered privately, with a public-facing proxy in `vpc-gateway` forwarding to an internal-only backend
 in `vpc-backend`.
 
+**Live demo (at time of submission):** http://a70f69fc209a64b6493fd1e3b6fd34da-1bd8e5286ab38186.elb.eu-west-1.amazonaws.com/
+This is the gateway's public NLB, provisioned by the pipeline described below - it's tied to whatever
+is currently deployed, so it stops resolving once the environment is torn down or the Service gets
+recreated. If it's not reachable, re-running `deploy.yml` stands the whole thing back up from scratch.
+
 ```
                          Internet
                             |
