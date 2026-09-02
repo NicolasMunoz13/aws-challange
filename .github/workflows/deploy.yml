@@ -1,0 +1,213 @@
+name: Deploy - Sentinel Split Architecture
+
+# runs on push to main only, everything else goes through ci.yml
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write # required for OIDC
+  contents: read
+
+env:
+  AWS_REGION: eu-west-1
+
+jobs:
+  terraform-apply:
+    name: Terraform plan & apply
+    runs-on: ubuntu-latest
+    environment: aws
+    defaults:
+      run:
+        working-directory: terraform
+    outputs:
+      gateway_cluster_name: ${{ steps.tf-outputs.outputs.gateway_cluster_name }}
+      backend_cluster_name: ${{ steps.tf-outputs.outputs.backend_cluster_name }}
+      backend_vpc_cidr: ${{ steps.tf-outputs.outputs.backend_vpc_cidr }}
+      backend_repo_url: ${{ steps.tf-outputs.outputs.backend_repo_url }}
+      gateway_repo_url: ${{ steps.tf-outputs.outputs.gateway_repo_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.8"
+
+      - run: terraform init
+
+      - run: terraform validate
+
+      - run: terraform plan -out=tfplan
+
+      - run: terraform apply -auto-approve tfplan
+
+      - name: Export outputs
+        id: tf-outputs
+        run: |
+          echo "gateway_cluster_name=$(terraform output -raw gateway_cluster_name)" >> "$GITHUB_OUTPUT"
+          echo "backend_cluster_name=$(terraform output -raw backend_cluster_name)" >> "$GITHUB_OUTPUT"
+          echo "backend_vpc_cidr=$(terraform output -raw backend_vpc_cidr)" >> "$GITHUB_OUTPUT"
+          echo "backend_repo_url=$(terraform output -raw backend_ecr_repository_url)" >> "$GITHUB_OUTPUT"
+          echo "gateway_repo_url=$(terraform output -raw gateway_ecr_repository_url)" >> "$GITHUB_OUTPUT"
+
+  build-and-push-images:
+    name: Build & push images to ECR
+    runs-on: ubuntu-latest
+    needs: terraform-apply
+    environment: aws
+    outputs:
+      backend_image: ${{ steps.tags.outputs.backend_image }}
+      gateway_image: ${{ steps.tags.outputs.gateway_image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr-login
+
+      - name: Build and push backend image
+        run: |
+          docker build -t "${{ needs.terraform-apply.outputs.backend_repo_url }}:${{ github.sha }}" apps/backend
+          docker push "${{ needs.terraform-apply.outputs.backend_repo_url }}:${{ github.sha }}"
+
+      - name: Build and push gateway image
+        run: |
+          docker build -t "${{ needs.terraform-apply.outputs.gateway_repo_url }}:${{ github.sha }}" apps/gateway
+          docker push "${{ needs.terraform-apply.outputs.gateway_repo_url }}:${{ github.sha }}"
+
+      - id: tags
+        run: |
+          echo "backend_image=${{ needs.terraform-apply.outputs.backend_repo_url }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          echo "gateway_image=${{ needs.terraform-apply.outputs.gateway_repo_url }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+  deploy-backend:
+    name: Deploy backend to eks-backend
+    runs-on: ubuntu-latest
+    needs: [terraform-apply, build-and-push-images]
+    environment: aws
+    outputs:
+      backend_lb_hostname: ${{ steps.wait-lb.outputs.hostname }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.31.0"
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "${{ needs.terraform-apply.outputs.backend_cluster_name }}" --region "${{ env.AWS_REGION }}"
+
+      - name: Validate manifests (server-side dry run against the real cluster)
+        run: |
+          sed -e "s|REPLACE_BACKEND_IMAGE|${{ needs.build-and-push-images.outputs.backend_image }}|" \
+              -e "s#REPLACE_BACKEND_VPC_CIDR#${{ needs.terraform-apply.outputs.backend_vpc_cidr }}#" \
+              -i k8s/backend/deployment.yaml k8s/backend/networkpolicy.yaml
+          kubectl apply --dry-run=server -f k8s/backend/
+
+      - name: Deploy
+        run: kubectl apply -f k8s/backend/
+
+      - name: Wait for rollout
+        run: kubectl -n sentinel rollout status deployment/backend --timeout=180s
+
+      - name: Wait for internal LoadBalancer hostname
+        id: wait-lb
+        run: |
+          for i in $(seq 1 30); do
+            HOSTNAME=$(kubectl -n sentinel get svc backend -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' || true)
+            if [ -n "$HOSTNAME" ]; then
+              echo "hostname=$HOSTNAME" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Waiting for backend LoadBalancer hostname... ($i/30)"
+            sleep 20
+          done
+          echo "Timed out waiting for backend LoadBalancer hostname" >&2
+          exit 1
+
+  deploy-gateway:
+    name: Deploy gateway to eks-gateway
+    runs-on: ubuntu-latest
+    needs: [terraform-apply, build-and-push-images, deploy-backend]
+    environment: aws
+    outputs:
+      gateway_lb_hostname: ${{ steps.wait-lb.outputs.hostname }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.31.0"
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "${{ needs.terraform-apply.outputs.gateway_cluster_name }}" --region "${{ env.AWS_REGION }}"
+
+      - name: Template & validate manifests (server-side dry run)
+        run: |
+          sed -e "s|REPLACE_GATEWAY_IMAGE|${{ needs.build-and-push-images.outputs.gateway_image }}|" \
+              -e "s|REPLACE_BACKEND_HOST|${{ needs.deploy-backend.outputs.backend_lb_hostname }}|" \
+              -i k8s/gateway/deployment.yaml
+          kubectl apply --dry-run=server -f k8s/gateway/
+
+      - name: Deploy
+        run: kubectl apply -f k8s/gateway/
+
+      - name: Wait for rollout
+        run: kubectl -n sentinel rollout status deployment/gateway --timeout=180s
+
+      - name: Wait for public LoadBalancer hostname
+        id: wait-lb
+        run: |
+          for i in $(seq 1 30); do
+            HOSTNAME=$(kubectl -n sentinel get svc gateway -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' || true)
+            if [ -n "$HOSTNAME" ]; then
+              echo "hostname=$HOSTNAME" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Waiting for gateway LoadBalancer hostname... ($i/30)"
+            sleep 20
+          done
+          echo "Timed out waiting for gateway LoadBalancer hostname" >&2
+          exit 1
+
+  verify:
+    name: Verify end-to-end (gateway -> backend)
+    runs-on: ubuntu-latest
+    needs: deploy-gateway
+    steps:
+      - name: Curl the public gateway until it proxies "Hello from backend"
+        run: |
+          HOSTNAME="${{ needs.deploy-gateway.outputs.gateway_lb_hostname }}"
+          echo "Gateway public endpoint: http://$HOSTNAME"
+          for i in $(seq 1 20); do
+            BODY=$(curl -sf --max-time 5 "http://$HOSTNAME/" || true)
+            if echo "$BODY" | grep -q "Hello from backend"; then
+              echo "Success: gateway proxied the backend response."
+              echo "$BODY"
+              exit 0
+            fi
+            echo "Not ready yet (DNS/LB propagation)... ($i/20)"
+            sleep 15
+          done
+          echo "Gateway never returned the backend's response" >&2
+          exit 1

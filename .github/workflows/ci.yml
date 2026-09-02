@@ -1,0 +1,97 @@
+name: CI - validate & lint
+
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  terraform-validate:
+    name: Terraform fmt / validate / tflint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.8"
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+
+      - name: terraform init (no backend, no AWS creds needed)
+        run: terraform init -backend=false
+
+      - name: terraform validate
+        run: terraform validate
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: tflint
+        run: |
+          tflint --init
+          tflint --recursive
+
+  terraform-validate-bootstrap:
+    name: Terraform fmt / validate (bootstrap stack)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bootstrap
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.8"
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+
+      - name: terraform validate
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+  kubernetes-validate:
+    name: Validate Kubernetes manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: kubeconform (schema validation, no cluster required)
+        run: |
+          curl -sL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
+          ./kubeconform -strict -summary -kubernetes-version 1.31.0 k8s/backend/*.yaml k8s/gateway/*.yaml
+
+      - name: kubectl apply --dry-run=client
+        run: |
+          curl -sL "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl" -o kubectl
+          chmod +x kubectl
+          # real values get filled in by deploy.yml, just need placeholders swapped for the dry run to pass
+          mkdir -p /tmp/dryrun
+          for f in k8s/backend/*.yaml k8s/gateway/*.yaml; do
+            sed -e 's/REPLACE_BACKEND_IMAGE/nginx:1.27-alpine/' \
+                -e 's/REPLACE_GATEWAY_IMAGE/nginx:1.27-alpine/' \
+                -e 's/REPLACE_BACKEND_HOST/backend.example.internal/' \
+                -e 's#REPLACE_BACKEND_VPC_CIDR#10.1.0.0/16#' \
+                "$f" > "/tmp/dryrun/$(basename "$f")"
+          done
+          ./kubectl apply --dry-run=client --validate=true -f /tmp/dryrun/
+
+  docker-build-check:
+    name: Docker images build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t backend:ci apps/backend
+      - run: docker build -t gateway:ci apps/gateway
