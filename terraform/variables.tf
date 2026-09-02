@@ -15,6 +15,12 @@ variable "suffix" {
   default     = "juani"
 }
 
+variable "human_user_name" {
+  description = "IAM user name granted EKS cluster-admin access alongside the CI role, for kubectl access outside the pipeline."
+  type        = string
+  default     = "juanicolasmuozcampos@gmail.com"
+}
+
 variable "azs" {
   description = "Availability zones used for both VPCs' subnets."
   type        = list(string)
