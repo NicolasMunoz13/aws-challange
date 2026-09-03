@@ -183,10 +183,15 @@ Two layers here, on purpose:
 
 1. **Security groups, the real boundary.** Both EKS clusters use their auto-created cluster security
    group, shared by the control plane and every managed-node-group instance since no custom launch
-   template is used. `modules/cross-vpc-sg` adds exactly two rules:
+   template is used. `modules/cross-vpc-sg` adds three rules:
    - Backend cluster SG: allow TCP 30081 from the gateway cluster's security group, a cross-VPC
      security-group reference, which AWS supports because the two VPCs are peered and in the same
-     account/region. Nothing else, from nowhere else, can reach the backend nodes on that port.
+     account/region. This is the only path real proxy traffic takes to reach the backend.
+   - Backend cluster SG: allow TCP 30081 from `vpc-backend`'s own CIDR too. The internal NLB's health
+     checks come from its own ENIs inside that VPC, not from the gateway cluster's SG, so without this
+     rule the NLB eventually marks every target unhealthy from failed health checks and stops routing
+     traffic altogether, including the traffic the rule above allows. Found this the hard way after
+     the demo silently went down a few hours after first deploying.
    - Gateway cluster SG: allow TCP 30080 from `0.0.0.0/0`, the one intentional public entry point.
 
 2. **Kubernetes NetworkPolicy, as an extra layer.** The backend namespace restricts ingress to the
