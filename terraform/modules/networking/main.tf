@@ -73,8 +73,7 @@ resource "aws_route_table" "public" {
   }
 }
 
-# separate resource, not inline on aws_route_table, the peering module adds its own route to this
-# same table via aws_route, and inline route blocks fight any route added outside of them
+# separate resource, not inline, inline route blocks fight any route the peering module adds separately
 resource "aws_route" "public_internet" {
   route_table_id         = aws_route_table.public.id
   destination_cidr_block = "0.0.0.0/0"

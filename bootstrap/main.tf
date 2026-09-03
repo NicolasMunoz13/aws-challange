@@ -114,9 +114,7 @@ data "aws_iam_policy_document" "github_actions_trust" {
       values   = ["${var.github_org}/${var.github_repo}"]
     }
 
-    # AWS requires a sub (or job_workflow_ref) condition on any GitHub OIDC trust policy, it won't
-    # accept repository alone, GitHub now embeds immutable ids into sub (repo:owner@id/repo@id:...)
-    # so this has to be wildcarded rather than a plain prefix match
+    # AWS also requires a sub condition, wildcarded since GitHub embeds ids into it now (repo:owner@id/repo@id:...)
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
@@ -126,9 +124,7 @@ data "aws_iam_policy_document" "github_actions_trust" {
 }
 
 resource "aws_iam_role" "github_actions" {
-  # -v2: the original sentinel-github-actions-juani got its trust policy wrong and this account
-  # grants no iam:UpdateAssumeRolePolicy or iam:DeleteRolePolicy, so it can't be fixed or removed -
-  # left orphaned on purpose, same pattern as other candidates' -v2/-v3 roles already in this account
+  # -v2: original role's trust policy was wrong and can't be fixed or deleted, left orphaned on purpose
   name                 = "sentinel-github-actions-${var.suffix}-v2"
   assume_role_policy   = data.aws_iam_policy_document.github_actions_trust.json
   max_session_duration = 3600

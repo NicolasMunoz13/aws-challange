@@ -11,9 +11,7 @@ resource "aws_security_group_rule" "backend_allow_from_gateway" {
   description              = "Backend Service NodePort, gateway cluster only"
 }
 
-# the internal NLB's health checks come from its own ENIs inside vpc-backend, not from the gateway
-# cluster's SG, so without this the NLB eventually marks every target unhealthy and stops routing
-# even the traffic the rule above allows
+# the backend LB's health checks come from inside vpc-backend itself, not the gateway SG, needs its own rule
 resource "aws_security_group_rule" "backend_allow_health_check" {
   type              = "ingress"
   security_group_id = var.backend_cluster_security_group_id
@@ -21,7 +19,7 @@ resource "aws_security_group_rule" "backend_allow_health_check" {
   to_port           = var.backend_node_port
   protocol          = "tcp"
   cidr_blocks       = [var.backend_vpc_cidr]
-  description       = "Backend Service NodePort, internal NLB health checks"
+  description       = "Backend Service NodePort, internal LB health checks"
 }
 
 # only public entry point in the whole setup
