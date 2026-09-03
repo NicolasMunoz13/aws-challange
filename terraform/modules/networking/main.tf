@@ -73,7 +73,7 @@ resource "aws_route_table" "public" {
   }
 }
 
-# separate resource, not inline on aws_route_table - the peering module adds its own route to this
+# separate resource, not inline on aws_route_table, the peering module adds its own route to this
 # same table via aws_route, and inline route blocks fight any route added outside of them
 resource "aws_route" "public_internet" {
   route_table_id         = aws_route_table.public.id
@@ -97,7 +97,7 @@ resource "aws_route_table" "private" {
   }
 }
 
-# separate resource, not inline - see the comment on aws_route.public_internet above
+# separate resource, not inline, see the comment on aws_route.public_internet above
 resource "aws_route" "private_nat" {
   count                  = length(var.private_subnet_cidrs)
   route_table_id         = aws_route_table.private[count.index].id

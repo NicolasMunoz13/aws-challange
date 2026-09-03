@@ -11,5 +11,5 @@ terraform {
 
 provider "aws" {
   region = var.region
-  # no default_tags - iam:TagRole isn't granted here, so tags are per-resource and iam roles stay untagged
+  # no default_tags, iam:TagRole isn't granted here, so tags are per-resource and iam roles stay untagged
 }

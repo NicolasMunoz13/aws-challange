@@ -7,7 +7,7 @@ variable "backend_cluster_security_group_id" {
 }
 
 variable "gateway_node_port" {
-  description = "Fixed NodePort the public gateway Service listens on. Opened to the internet - this is the intended public entry point."
+  description = "Fixed NodePort the public gateway Service listens on. Opened to the internet, this is the intended public entry point."
   type        = number
 }
 

@@ -1,4 +1,4 @@
-# one-time manual bootstrap - state bucket + CI role that ../terraform needs to actually run
+# one-time manual bootstrap, state bucket + CI role that ../terraform needs to actually run
 
 terraform {
   required_version = ">= 1.9"
@@ -115,7 +115,7 @@ data "aws_iam_policy_document" "github_actions_trust" {
     }
 
     # AWS requires a sub (or job_workflow_ref) condition on any GitHub OIDC trust policy, it won't
-    # accept repository alone - GitHub now embeds immutable ids into sub (repo:owner@id/repo@id:...)
+    # accept repository alone, GitHub now embeds immutable ids into sub (repo:owner@id/repo@id:...)
     # so this has to be wildcarded rather than a plain prefix match
     condition {
       test     = "StringLike"
@@ -132,10 +132,10 @@ resource "aws_iam_role" "github_actions" {
   name                 = "sentinel-github-actions-${var.suffix}-v2"
   assume_role_policy   = data.aws_iam_policy_document.github_actions_trust.json
   max_session_duration = 3600
-  # no tags - CreateRole is allowed but TagRole isn't, and IAM checks that even for inline tags
+  # no tags, CreateRole is allowed but TagRole isn't, and IAM checks that even for inline tags
 }
 
-# same permissions as Candidates_Policy - CI shouldn't be able to do more than I can
+# same permissions as Candidates_Policy, CI shouldn't be able to do more than I can
 data "aws_iam_policy_document" "github_actions_permissions" {
   statement {
     sid    = "AllowRequiredServices"

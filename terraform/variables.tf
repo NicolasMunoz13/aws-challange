@@ -69,7 +69,7 @@ variable "node_instance_types" {
 }
 
 variable "node_capacity_type" {
-  description = "ON_DEMAND or SPOT. SPOT is cheaper but can be interrupted - fine for this PoC."
+  description = "ON_DEMAND or SPOT. SPOT is cheaper but can be interrupted, fine for this PoC."
   type        = string
   default     = "ON_DEMAND"
 }

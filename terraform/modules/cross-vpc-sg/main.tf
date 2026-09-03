@@ -8,7 +8,7 @@ resource "aws_security_group_rule" "backend_allow_from_gateway" {
   to_port                  = var.backend_node_port
   protocol                 = "tcp"
   source_security_group_id = var.gateway_cluster_security_group_id
-  description              = "Backend Service NodePort - gateway cluster only"
+  description              = "Backend Service NodePort, gateway cluster only"
 }
 
 # only public entry point in the whole setup

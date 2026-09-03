@@ -4,7 +4,7 @@ locals {
   gateway_cluster_name = "eks-gateway-${var.suffix}"
   backend_cluster_name = "eks-backend-${var.suffix}"
 
-  # hardcoded, not data.aws_caller_identity.current.arn - in CI that resolves to an assumed-role
+  # hardcoded, not data.aws_caller_identity.current.arn, in CI that resolves to an assumed-role
   # session arn (assumed-role/.../GitHubActions), which EKS access entries reject outright
   admin_principal_arns = distinct([
     "arn:aws:iam::${data.aws_caller_identity.current.account_id}:user/${var.human_user_name}",
