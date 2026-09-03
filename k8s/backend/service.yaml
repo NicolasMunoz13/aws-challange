@@ -6,7 +6,10 @@ metadata:
   labels:
     app: backend
   annotations:
-    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    # classic ELB, not nlb, on purpose: NLB instance targets always preserve client IP, and AWS
+    # doesn't support that for clients reaching the LB over a VPC peering connection, which is
+    # exactly the gateway's path here. classic ELB proxies the connection instead of passing it
+    # through, so it works fine across peering
     service.beta.kubernetes.io/aws-load-balancer-internal: "true"
 spec:
   type: LoadBalancer
