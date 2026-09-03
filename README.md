@@ -53,9 +53,10 @@ recreated. If it's not reachable, re-running `deploy.yml` stands the whole thing
 ## Prerequisites & how to run
 
 This repo doesn't support running `terraform apply` from a laptop for the main stack - the challenge
-requires Terraform to run only through GitHub Actions. There's one separate, one-time manual step to
-bootstrap the two things CI needs before it can run at all (the usual chicken-and-egg problem with
-Terraform backends and CI roles):
+requires Terraform to run only through GitHub Actions. Before CI can run, though, two things have to
+exist first: the S3 bucket Terraform stores its state in, and the IAM role CI assumes to talk to AWS.
+Terraform can't create either of those for itself, so there's one small, separate, one-time step to
+set them up manually:
 
 1. **Bootstrap** (`bootstrap/`) - applied once, manually, with the AWS credentials for this account:
    ```bash
@@ -69,8 +70,8 @@ Terraform backends and CI roles):
      long-lived AWS credentials ever sit in GitHub. Its permission policy mirrors the account's own
      `Candidates_Policy` - CI can't do anything a candidate couldn't already do by hand.
 
-   This is genuinely separate from the challenge's infrastructure: it just provisions the CI identity
-   and the state backend, not any part of the Sentinel architecture itself.
+   This isn't part of the Sentinel architecture itself - it just sets up the CI identity and the
+   state backend everything else depends on.
 
 2. In the GitHub repo, add a repository variable:
    `Settings -> Secrets and variables -> Actions -> Variables`
@@ -93,7 +94,7 @@ its restrictions ended up driving real architecture decisions:
 |---|---|
 | `iam:CreateRole` / `AttachRolePolicy` / `PassRole` etc. restricted to `role/eks-*` and `role/sentinel-*` | Every IAM role this repo creates uses one of those two prefixes (`modules/iam-eks`, and the bootstrap CI role `sentinel-github-actions-juani-v2`). |
 | No `iam:UpdateAssumeRolePolicy` or `iam:DeleteRolePolicy` granted | A role's trust policy can never be edited after creation, and a role with an inline policy can never be deleted either (both blocked). The first CI role (`sentinel-github-actions-juani`, no `-v2`) got its trust policy condition wrong and is now permanently stuck that way - it's abandoned in place rather than fixed, and a new role (`-v2`) was created correctly instead. Same pattern visible on several other candidates' leftover roles in this account (`-v2`, `-v3` suffixes). |
-| AWS rejects a GitHub OIDC trust policy that conditions only on the `repository` claim | Must also include a `sub` (or `job_workflow_ref`) condition, even though `repository` alone is arguably the cleaner scoping given GitHub now embeds immutable ids into `sub` (`repo:owner@id/repo@id:...`). The trust policy keeps both: `repository` for the real scoping, `sub` wildcarded to satisfy AWS's validator. |
+| AWS rejects a GitHub OIDC trust policy that conditions only on the `repository` claim | Has to include a `sub` (or `job_workflow_ref`) condition too, even though `repository` alone would actually be the cleaner scoping now that GitHub embeds immutable ids into `sub` (`repo:owner@id/repo@id:...`). The trust policy keeps both: `repository` for the real scoping, `sub` wildcarded just to satisfy AWS's validator. |
 | `kms:*` explicitly denied | No EKS secrets envelope encryption, no customer-managed keys anywhere. The state bucket uses SSE-S3 (`AES256`), not SSE-KMS. |
 | No `dynamodb:*` in the allow-list | State locking uses Terraform's native S3 lockfile (`use_lockfile = true`, Terraform >= 1.10) instead of a DynamoDB lock table. |
 | `iam:CreateOpenIDConnectProvider` not granted (only `Get*/List*/Simulate*` + `CreateServiceLinkedRole`) | Can't register a new OIDC provider. The GitHub Actions one already existed in the account, so the CI role's trust policy just references it - but IRSA for the EKS clusters themselves isn't possible, since each cluster's own OIDC issuer would need to be registered as a new IAM OIDC provider. That's why there's no AWS Load Balancer Controller or IRSA-based cluster-autoscaler in this PoC, both normally rely on it. Instead, the public and internal LoadBalancer Services go through EKS's built-in (in-tree) AWS cloud provider, which needs no IRSA, and cross-VPC access is enforced directly on the EKS-managed cluster security groups. With that constraint lifted, I'd install the AWS Load Balancer Controller via IRSA and switch to `Ingress` with `ip` targets instead of NodePort pass-through. |
@@ -101,9 +102,9 @@ its restrictions ended up driving real architecture decisions:
 | Region locked to `eu-west-1` for this user | Hardcoded as the only allowed value (with a `variable` validation block), matching the challenge's own instruction. |
 | Account is shared across multiple candidates (visible via ~90 pre-existing `eks-*`/`sentinel-*` roles and a dozen state buckets from other candidates) | Every resource name (VPCs, IAM roles, EKS clusters, ECR repos, state bucket) carries a `juani` suffix to avoid stepping on other candidates running in the same account. |
 
-I didn't try to work around any of these. Where a constraint removed a capability (IRSA, KMS,
-DynamoDB), I picked the next-best AWS-native alternative and wrote down the trade-off, both here and
-inline in the Terraform.
+I didn't try to work around any of these. Where a constraint took a capability off the table (IRSA,
+KMS, DynamoDB), I used whatever the next-best option was and wrote down why, both here and inline in
+the Terraform.
 
 ## Repository structure
 
@@ -188,13 +189,12 @@ Two layers here, on purpose:
      account/region. Nothing else, from nowhere else, can reach the backend nodes on that port.
    - Gateway cluster SG: allow TCP 30080 from `0.0.0.0/0`, the one intentional public entry point.
 
-2. **Kubernetes NetworkPolicy, as defense in depth.** The backend namespace restricts ingress to the
+2. **Kubernetes NetworkPolicy, as an extra layer.** The backend namespace restricts ingress to the
    backend pods to traffic sourced from `vpc-backend`'s own CIDR, enforced by the VPC CNI via
-   `enableNetworkPolicy: "true"` on the `vpc-cni` addon. It doesn't add a boundary the security group
-   doesn't already provide - both ultimately gate on "traffic has to come from inside this
-   architecture" - but it does mean a rogue pod that somehow ended up in the backend cluster still
-   can't reach the app directly. The real cross-VPC boundary stays the security group rule above, not
-   this policy.
+   `enableNetworkPolicy: "true"` on the `vpc-cni` addon. It's not really adding a boundary the
+   security group doesn't already cover, but it does mean a rogue pod that somehow ended up in the
+   backend cluster still can't reach the app directly. The real cross-VPC boundary is still the
+   security group rule above, not this policy.
 
 No public EC2 instances exist anywhere. The only two public-facing AWS resources are the gateway's
 NLB and, implicitly, the NAT Gateways' EIPs, which accept no inbound connections.
@@ -223,9 +223,9 @@ Two workflows, both triggered on push (the mandatory requirement):
      backend", which proves the full path (internet -> public NLB -> gateway pod -> peering ->
      internal NLB -> backend pod) actually works, not just that `kubectl apply` didn't error out.
 
-  All jobs reference a GitHub Environment named `aws`, which holds the `AWS_ROLE_ARN` variable - a
-  natural place to later add required reviewers or a wait timer for a stricter production gate,
-  without touching the workflow logic itself.
+  All jobs reference a GitHub Environment named `aws`, which holds the `AWS_ROLE_ARN` variable. That
+  also means required reviewers or a wait timer could be bolted on later without touching any
+  workflow logic - just a settings change on the environment.
 
 ## Trade-offs (3-day constraint)
 
@@ -252,8 +252,7 @@ Two workflows, both triggered on push (the mandatory requirement):
 - **NAT Gateway**: one per VPC (2 total) instead of one per AZ (which would be 4). NAT Gateways are
   billed hourly plus per-GB processed regardless of traffic, so halving the count directly halves
   this cost; the trade-off is a single point of failure and cross-AZ data processing charges for
-  nodes in the second AZ. For a PoC this is the right side of that trade; for production I'd go back
-  to one per AZ.
+  nodes in the second AZ. Fine for a PoC, but I'd go back to one per AZ for production.
 - **Node sizing**: `t3.medium` on-demand, 2 nodes desired (min 1, max 3) per cluster - about the
   smallest instance size that comfortably runs the EKS system daemonsets (`vpc-cni`, `kube-proxy`,
   `coredns`) alongside the actual workload. `node_capacity_type` is a variable; flipping it to `SPOT`
