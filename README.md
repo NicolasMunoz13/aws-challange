@@ -32,7 +32,7 @@ recreated. If it's not reachable, re-running `deploy.yml` stands the whole thing
                  +---------------------+
                             ^
                  +---------------------+
-                 |  Internal NLB        |  reachable only from the
+                 |  Internal ELB        |  reachable only from the
                  |  (backend Service)   |  gateway cluster's SG
                  +---------------------+
 ```
@@ -158,20 +158,28 @@ anonymous. In production I'd run a self-hosted runner inside the VPC and switch 
 ## How the proxy reaches the backend
 
 The backend Service is `type: LoadBalancer` with the in-tree provider's
-`aws-load-balancer-internal: "true"` and `aws-load-balancer-type: "nlb"` annotations, so it
-provisions an internal NLB living in `vpc-backend`'s private subnets with a private IP, no public
-exposure at all.
+`aws-load-balancer-internal: "true"` annotation, which provisions an internal Classic ELB living in
+`vpc-backend`'s private subnets, no public exposure at all. It's a Classic ELB rather than an NLB on
+purpose: NLB `instance` targets always preserve the client's IP, and AWS doesn't support that when the
+client reaches the load balancer over a VPC peering connection, which is exactly the gateway's path
+here. Found this by testing the actual traffic path, not just reading docs: health checks for the
+backend's load balancer come from inside `vpc-backend` itself, so they passed even with an NLB, and a
+direct connection to a backend node's private IP also worked, which is what pointed at the load
+balancer layer specifically rather than routing or security groups. A Classic ELB proxies the
+connection instead of passing it through, so it works fine across peering. The gateway's own Service
+stays an NLB, its clients come from the public internet, not a peered VPC, so the limitation doesn't
+apply there.
 
 The gateway's nginx container is templated at startup, using the official nginx image's
 `envsubst`-over-`/etc/nginx/templates/*.template` mechanism, with `BACKEND_HOST`/`BACKEND_PORT`
-environment variables. The CI pipeline only learns the backend NLB's DNS hostname after deploying it
-(the `deploy-backend` job), then injects it into the gateway's Deployment before deploying the
-gateway (`deploy-gateway`, which `needs: deploy-backend`).
+environment variables. The CI pipeline only learns the backend load balancer's DNS hostname after
+deploying it (the `deploy-backend` job), then injects it into the gateway's Deployment before
+deploying the gateway (`deploy-gateway`, which `needs: deploy-backend`).
 
-The gateway pod resolves that hostname to the internal NLB's private IP across the VPC peering
-connection, this only works because DNS resolution for the peering connection is explicitly enabled
-in `modules/peering`. Using the AWS-managed DNS name instead of hardcoding the NLB's IP means the
-link survives the NLB being replaced.
+The gateway pod resolves that hostname to the backend load balancer's private IP across the VPC
+peering connection, this only works because DNS resolution for the peering connection is explicitly
+enabled in `modules/peering`. Using the AWS-managed DNS name instead of hardcoding the IP means the
+link survives the load balancer being replaced.
 
 Both Services use a fixed NodePort (30080 gateway, 30081 backend) instead of a random one from the
 ephemeral range, so the Terraform-managed security group rules in `modules/cross-vpc-sg` only need to
@@ -187,11 +195,12 @@ Two layers here, on purpose:
    - Backend cluster SG: allow TCP 30081 from the gateway cluster's security group, a cross-VPC
      security-group reference, which AWS supports because the two VPCs are peered and in the same
      account/region. This is the only path real proxy traffic takes to reach the backend.
-   - Backend cluster SG: allow TCP 30081 from `vpc-backend`'s own CIDR too. The internal NLB's health
-     checks come from its own ENIs inside that VPC, not from the gateway cluster's SG, so without this
-     rule the NLB eventually marks every target unhealthy from failed health checks and stops routing
-     traffic altogether, including the traffic the rule above allows. Found this the hard way after
-     the demo silently went down a few hours after first deploying.
+   - Backend cluster SG: allow TCP 30081 from `vpc-backend`'s own CIDR too. The backend's load
+     balancer runs its health checks from its own ENIs inside that VPC, not from the gateway
+     cluster's SG, so without this rule it eventually marks every target unhealthy from failed
+     health checks and stops routing traffic altogether, including the traffic the rule above
+     allows. Found this the hard way after the demo silently went down a few hours after first
+     deploying.
    - Gateway cluster SG: allow TCP 30080 from `0.0.0.0/0`, the one intentional public entry point.
 
 2. **Kubernetes NetworkPolicy, as an extra layer.** The backend namespace restricts ingress to the
@@ -222,11 +231,11 @@ Two workflows, both triggered on push (the mandatory requirement):
   2. `build-and-push-images`, builds and pushes both images, tagged with the commit SHA.
   3. `deploy-backend`, `aws eks update-kubeconfig`, templates the image tag and VPC CIDR into the
      manifests, runs `kubectl apply --dry-run=server` for a real server-side check against the live
-     cluster, then applies for real and waits for the internal NLB hostname.
-  4. `deploy-gateway`, same pattern, plus templating in the backend's NLB hostname from step 3.
+     cluster, then applies for real and waits for the internal load balancer's hostname.
+  4. `deploy-gateway`, same pattern, plus templating in the backend's hostname from step 3.
   5. `verify`, curls the gateway's public hostname in a retry loop until it returns "Hello from
      backend", which proves the full path (internet -> public NLB -> gateway pod -> peering ->
-     internal NLB -> backend pod) actually works, not just that `kubectl apply` didn't error out.
+     internal ELB -> backend pod) actually works, not just that `kubectl apply` didn't error out.
 
   All jobs reference a GitHub Environment named `aws`, which holds the `AWS_ROLE_ARN` variable. That
   also means required reviewers or a wait timer could be bolted on later without touching any
@@ -266,8 +275,11 @@ Two workflows, both triggered on push (the mandatory requirement):
   `coredns`) alongside the actual workload. `node_capacity_type` is a variable; flipping it to `SPOT`
   would cut compute cost significantly for a non-production PoC at the risk of interruption, left as
   `ON_DEMAND` by default for a more predictable evaluation run.
-- **Load balancer type**: NLB, not Classic ELB or ALB, for both Services. NLBs are cheaper at this
-  traffic scale and match this PoC's pure-L4 pass-through use case, no L7 routing needed.
+- **Load balancer type**: NLB for the gateway's public Service, cheaper at this traffic scale and a
+  fine match for pure-L4 pass-through with no L7 routing needed. The backend's internal Service uses
+  a Classic ELB instead, not for cost, but because NLB instance targets always preserve client IP and
+  AWS doesn't support that over a VPC peering connection (see [how the proxy reaches the
+  backend](#how-the-proxy-reaches-the-backend)).
 - **ECR lifecycle policy**: untagged images expire after 7 days, so accumulated CI build artifacts
   don't quietly grow the storage bill.
 - **No KMS customer-managed keys** anywhere (also required by the account's guardrail), SSE-S3/AES256
