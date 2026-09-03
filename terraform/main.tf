@@ -100,6 +100,7 @@ module "cross_vpc_sg" {
   backend_cluster_security_group_id = module.eks_backend.cluster_security_group_id
   gateway_node_port                 = var.gateway_node_port
   backend_node_port                 = var.backend_node_port
+  backend_vpc_cidr                  = module.network_backend.vpc_cidr_block
 
   depends_on = [module.peering]
 }

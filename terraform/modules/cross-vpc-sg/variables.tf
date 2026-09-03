@@ -15,3 +15,8 @@ variable "backend_node_port" {
   description = "Fixed NodePort the internal backend Service listens on. Opened only to the gateway cluster's security group, never to the internet."
   type        = number
 }
+
+variable "backend_vpc_cidr" {
+  description = "vpc-backend's CIDR, needed so the internal NLB's own health checks (sourced from inside this VPC) can reach the backend NodePort."
+  type        = string
+}
