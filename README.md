@@ -92,15 +92,15 @@ its restrictions ended up driving real architecture decisions:
 
 | Constraint (from the policy) | Effect on the design |
 |---|---|
-| `iam:CreateRole` / `AttachRolePolicy` / `PassRole` etc. restricted to `role/eks-*` and `role/sentinel-*` | Every IAM role this repo creates uses one of those two prefixes (`modules/iam-eks`, and the bootstrap CI role `sentinel-github-actions-juani-v2`). |
-| No `iam:UpdateAssumeRolePolicy` or `iam:DeleteRolePolicy` granted | A role's trust policy can never be edited after creation, and a role with an inline policy can never be deleted either (both blocked). The first CI role (`sentinel-github-actions-juani`, no `-v2`) got its trust policy condition wrong and is now permanently stuck that way - it's abandoned in place rather than fixed, and a new role (`-v2`) was created correctly instead. Same pattern visible on several other candidates' leftover roles in this account (`-v2`, `-v3` suffixes). |
-| AWS rejects a GitHub OIDC trust policy that conditions only on the `repository` claim | Has to include a `sub` (or `job_workflow_ref`) condition too, even though `repository` alone would actually be the cleaner scoping now that GitHub embeds immutable ids into `sub` (`repo:owner@id/repo@id:...`). The trust policy keeps both: `repository` for the real scoping, `sub` wildcarded just to satisfy AWS's validator. |
-| `kms:*` explicitly denied | No EKS secrets envelope encryption, no customer-managed keys anywhere. The state bucket uses SSE-S3 (`AES256`), not SSE-KMS. |
-| No `dynamodb:*` in the allow-list | State locking uses Terraform's native S3 lockfile (`use_lockfile = true`, Terraform >= 1.10) instead of a DynamoDB lock table. |
-| `iam:CreateOpenIDConnectProvider` not granted (only `Get*/List*/Simulate*` + `CreateServiceLinkedRole`) | Can't register a new OIDC provider. The GitHub Actions one already existed in the account, so the CI role's trust policy just references it - but IRSA for the EKS clusters themselves isn't possible, since each cluster's own OIDC issuer would need to be registered as a new IAM OIDC provider. That's why there's no AWS Load Balancer Controller or IRSA-based cluster-autoscaler in this PoC, both normally rely on it. Instead, the public and internal LoadBalancer Services go through EKS's built-in (in-tree) AWS cloud provider, which needs no IRSA, and cross-VPC access is enforced directly on the EKS-managed cluster security groups. With that constraint lifted, I'd install the AWS Load Balancer Controller via IRSA and switch to `Ingress` with `ip` targets instead of NodePort pass-through. |
-| Tagging an IAM role needs `iam:TagRole`, which isn't granted, even for tags passed inline on `CreateRole` | No IAM role in this repo carries `tags`, and the AWS provider isn't configured with `default_tags` either (that would silently try to tag every `aws_iam_role` too and break every apply). Everything else - EC2, EKS, ECR, S3 - is tagged normally since those services are fully allowed. |
-| Region locked to `eu-west-1` for this user | Hardcoded as the only allowed value (with a `variable` validation block), matching the challenge's own instruction. |
-| Account is shared across multiple candidates (visible via ~90 pre-existing `eks-*`/`sentinel-*` roles and a dozen state buckets from other candidates) | Every resource name (VPCs, IAM roles, EKS clusters, ECR repos, state bucket) carries a `juani` suffix to avoid stepping on other candidates running in the same account. |
+| IAM role actions restricted to `role/eks-*` and `role/sentinel-*` | Every role this repo creates uses one of those two prefixes. |
+| No `iam:UpdateAssumeRolePolicy` or `iam:DeleteRolePolicy` | A role's trust policy can't be edited or removed after creation. Hit this firsthand: the first CI role (`sentinel-github-actions-juani`) had its trust policy wrong and is now stuck that way permanently, abandoned in place. A new role (`-v2`) was created correctly instead - the same `-v2`/`-v3` pattern shows up on other candidates' leftover roles in this account too. |
+| AWS requires a `sub` (or `job_workflow_ref`) condition on GitHub OIDC trust policies, `repository` alone isn't accepted | The trust policy keeps both: `repository` for the actual scoping, `sub` wildcarded just to pass AWS's validator (GitHub now embeds immutable ids into `sub`, so a plain prefix match on it doesn't work anyway). |
+| `kms:*` denied | No EKS secrets encryption, no customer-managed keys. State bucket uses SSE-S3 instead of SSE-KMS. |
+| No `dynamodb:*` allowed | State locking uses Terraform's native S3 lockfile instead of a DynamoDB table. |
+| No `iam:CreateOpenIDConnectProvider` | Can't register a new OIDC provider, so IRSA isn't available for the EKS clusters (each would need its own). That's why there's no AWS Load Balancer Controller here - see [trade-offs](#trade-offs-3-day-constraint) for what that changes. |
+| Tagging an IAM role needs `iam:TagRole`, not granted | No IAM role in this repo has `tags`, and the provider isn't configured with `default_tags` either. Every other resource type is tagged normally. |
+| Region locked to `eu-west-1` | Hardcoded with a `variable` validation block. |
+| Account shared across candidates (~90 leftover `eks-*`/`sentinel-*` roles, a dozen state buckets from others) | Every resource name carries a `juani` suffix to avoid collisions. |
 
 I didn't try to work around any of these. Where a constraint took a capability off the table (IRSA,
 KMS, DynamoDB), I used whatever the next-best option was and wrote down why, both here and inline in
@@ -233,8 +233,11 @@ Two workflows, both triggered on push (the mandatory requirement):
   remote-state data sources between them. Simpler to review and apply in the time available; the
   downside is that a gateway-only change still plans against the whole graph.
 - **One NAT Gateway per VPC**, not one per AZ, see the cost notes below.
-- **No AWS Load Balancer Controller / IRSA** anywhere (see the constraints table above), so Services
-  use the in-tree provider's NodePort+LB pass-through model instead of `Ingress` with IP targets.
+- **No AWS Load Balancer Controller / IRSA.** IRSA needs each cluster's own OIDC issuer registered as
+  an IAM OIDC provider, and creating a new one isn't allowed in this account. So Services go through
+  EKS's built-in in-tree cloud provider instead (NodePort + LB pass-through, no `Ingress`/IP targets),
+  and cross-VPC access is enforced on the EKS-managed cluster security groups directly. With IRSA
+  available I'd install the AWS Load Balancer Controller and switch to `Ingress` with `ip` targets.
 - **No staging/production environment split.** A real Sentinel rollout would have per-environment
   state (`envs/dev`, `envs/prod`) and a plan-on-PR / apply-on-merge gate with manual approval; this
   PoC has one environment (`aws`) because building and validating two from scratch wasn't realistic
