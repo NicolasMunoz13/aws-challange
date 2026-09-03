@@ -6,7 +6,6 @@ metadata:
   labels:
     app: backend
   annotations:
-    # classic ELB, not nlb, since NLB instance targets can't preserve client IP across a VPC peering connection
     service.beta.kubernetes.io/aws-load-balancer-internal: "true"
 spec:
   type: LoadBalancer
